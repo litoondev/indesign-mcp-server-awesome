@@ -1,0 +1,27 @@
+# Dependencies & build output
+node_modules/
+dist/
+
+# Client documents and test artifacts (never publish)
+test_fixtures/
+test_output/
+content/
+*.indd
+*.indt
+*.idlk
+*.docx
+*.xlsx
+
+# Local-only folders
+_snapshots/
+refs/
+
+# Local machine config
+.mcp.json
+chatgpt-mcp-config.json
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log

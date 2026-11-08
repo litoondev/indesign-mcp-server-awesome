@@ -1,0 +1,39 @@
+{
+  "name": "indesign-mcp-server",
+  "version": "1.0.0",
+  "description": "Comprehensive MCP server for Adobe InDesign automation — 150+ tools covering documents, pages, text, styles, tables, images, colors, export, import, templates, and batch operations. Cross-platform: Windows (COM) and macOS (AppleScript).",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "indesign-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "mcp",
+    "indesign",
+    "adobe",
+    "automation",
+    "publishing",
+    "typography",
+    "layout"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "csv-parse": "^7.0.3",
+    "mammoth": "^1.13.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
