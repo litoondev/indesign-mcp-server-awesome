@@ -1,4 +1,4 @@
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { platform } from "node:os";
 
@@ -49,9 +49,50 @@ function realish(p: string): string {
   }
 }
 
+/**
+ * Resolves a path against the actual filesystem, fixing component-level
+ * mismatches such as trailing spaces in directory names.  On macOS APFS a
+ * folder named "Foo " (with trailing space) is distinct from "Foo", but callers
+ * typically pass "Foo" without the space.  This walks from the deepest existing
+ * ancestor toward the leaf; for each component that does not exist on disk it
+ * lists the parent directory and picks the entry whose trimmed name matches.
+ */
+function resolveToDisk(p: string): string {
+  const resolved = P.resolve(p);
+  const parts: string[] = [];
+  let cur = resolved;
+  while (!existsSync(cur)) {
+    const parent = P.dirname(cur);
+    if (parent === cur) return resolved;
+    parts.unshift(P.basename(cur));
+    cur = parent;
+  }
+  let result = cur;
+  try { result = realpathSync.native(result); } catch { /* keep as-is */ }
+
+  for (const part of parts) {
+    const candidate = P.join(result, part);
+    if (existsSync(candidate)) {
+      try { result = realpathSync.native(candidate); } catch { result = candidate; }
+      continue;
+    }
+    try {
+      const entries = readdirSync(result);
+      const trimmed = part.trim().toLowerCase();
+      const match = entries.find((e) => e.trim().toLowerCase() === trimmed);
+      if (match) {
+        result = P.join(result, match);
+        continue;
+      }
+    } catch { /* parent not listable */ }
+    result = P.join(result, part);
+  }
+  return result;
+}
+
 /** Comparison key: absolute, real, '/'-separated, lower-cased, no trailing '/'. */
 export function normalizeForCompare(p: string): string {
-  return realish(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return resolveToDisk(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
 export function getWriteRoots(): string[] {
@@ -60,7 +101,7 @@ export function getWriteRoots(): string[] {
     .split(";")
     .map((s) => s.trim())
     .filter(Boolean)
-    .map((s) => P.resolve(s));
+    .map((s) => resolveToDisk(s));
 }
 
 function rootKeys(): string[] {
@@ -148,7 +189,7 @@ export function assertSafeWritePath(
   opts: SafeWriteOptions = {}
 ): string {
   if (typeof p !== "string" || p.trim() === "") throw new SafetyError("a non-empty file path is required");
-  const resolved = P.resolve(p.trim());
+  const resolved = resolveToDisk(p.trim());
   if (isProtectedBasename(resolved)) {
     throw new SafetyError(`refusing to write the protected test master (${resolved}). Copy it to a run folder first.`);
   }
@@ -180,7 +221,7 @@ export function assertSafeWritePath(
 /** Validates an output folder (exports, packages). Returns the resolved path. */
 export function assertSafeWriteDir(p: unknown): string {
   if (typeof p !== "string" || p.trim() === "") throw new SafetyError("a non-empty folder path is required");
-  const resolved = P.resolve(p.trim());
+  const resolved = resolveToDisk(p.trim());
   assertNotBlockedDownloads(resolved);
   if (!isUnderWriteRoots(resolved)) {
     throw new SafetyError(

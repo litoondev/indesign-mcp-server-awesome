@@ -1366,7 +1366,8 @@ async function replaceParagraphs(bridge: InDesignBridge, args: Record<string, un
     const edits = (args.edits as unknown[]).map(normalizeEdit);
     const dryRun = args.dryRun === true;
     if (args.allowOverset !== undefined && args.allowOverset !== null && typeof args.allowOverset !== "boolean") throw new Error("allowOverset must be a boolean");
-    const allowOverset = args.allowOverset === true;
+    const autoFlow = args.autoFlow !== false;
+    const allowOverset = args.allowOverset === true || autoFlow;
     const body = jsx`
       var story = __tp_requireStory(doc, ${jsNumOpt(args.storyId, "storyId", { int: true })}, ${jsNumOpt(args.frameId, "frameId", { int: true })});
       var res = __tp_replaceParagraphs(doc, story, ${jsJson(edits)}, {keepLeadingAnchors: ${args.keepLeadingAnchors !== false}, dryRun: ${dryRun}, acceptGrepEffects: ${args.acceptGrepEffects === true}, rollbackOnOverset: ${allowOverset !== true}, allowOverset: ${allowOverset === true}});
@@ -1403,6 +1404,26 @@ async function replaceParagraphs(bridge: InDesignBridge, args: Record<string, un
         return { success: false, error: "replace_paragraphs: the write pushed text into overset but was NOT rolled back automatically — undo it", data };
       }
       return { success: true, data };
+    }
+    // autoFlow: if the write succeeded and the story overflows, automatically
+    // call continueStory to add pages for the overflow text.
+    if (autoFlow && r.success && !dryRun) {
+      const flowArgs: Record<string, unknown> = { document_id: args.document_id, _noUndo: true };
+      if (args.storyId !== undefined) flowArgs.storyId = args.storyId;
+      if (args.frameId !== undefined) flowArgs.frameId = args.frameId;
+      const flowR = await continueStory(bridge, flowArgs);
+      const flowData = flowR.data as Record<string, unknown> | undefined;
+      if (r.data && typeof r.data === "object") (r.data as Record<string, unknown>).autoFlow = flowR.data;
+      if (!flowR.success || (flowData && flowData.blocker)) {
+        const rb = await rollbackIfNamed(bridge, args, "replace_paragraphs");
+        const rolledBack = ((rb.data as Record<string, unknown>) ?? {}).rolledBack === true;
+        if (r.data && typeof r.data === "object") (r.data as Record<string, unknown>).rolledBack = rolledBack;
+        return {
+          success: false,
+          error: `replace_paragraphs autoFlow: continue_story ${flowR.success ? "hit a blocker" : "failed"} — ${flowR.error || (flowData?.blocker as Record<string, unknown>)?.reasons || "unknown"}; the edit was ${rolledBack ? "rolled back" : "NOT rolled back — undo it"}`,
+          data: r.data,
+        };
+      }
     }
     return r;
   });
@@ -1479,7 +1500,8 @@ async function replaceContactBlock(bridge: InDesignBridge, args: Record<string, 
     const dryRun = args.dryRun === true;
     const acceptGrep = args.acceptGrepEffects === true;
     if (args.allowOverset !== undefined && args.allowOverset !== null && typeof args.allowOverset !== "boolean") throw new Error("allowOverset must be a boolean");
-    const allowOverset = args.allowOverset === true;
+    const autoFlow = args.autoFlow !== false;
+    const allowOverset = args.allowOverset === true || autoFlow;
     const paraArg = args.firstParagraphIndex ?? args.storyParagraphIndex;
     const scope = {
       blockIndex: args.blockIndex === undefined || args.blockIndex === null ? null : Number(jsNum(args.blockIndex, "blockIndex", { int: true, min: 0 })),
@@ -1785,6 +1807,28 @@ async function replaceContactBlock(bridge: InDesignBridge, args: Record<string, 
       }
       return { success: true, data };
     }
+    // autoFlow: if the write succeeded and the story overflows, automatically
+    // call continueStory to add pages for the overflow text.
+    if (autoFlow && r.success && !dryRun) {
+      const flowArgs: Record<string, unknown> = { document_id: args.document_id, _noUndo: true };
+      if (args.storyId !== undefined) flowArgs.storyId = args.storyId;
+      else if (data && data.storyId !== undefined) flowArgs.storyId = data.storyId;
+      if (args.frameId !== undefined) flowArgs.frameId = args.frameId;
+      else if (data && data.frameId !== undefined) flowArgs.frameId = data.frameId;
+      const flowR = await continueStory(bridge, flowArgs);
+      const flowData = flowR.data as Record<string, unknown> | undefined;
+      if (data) data.autoFlow = flowR.data;
+      if (!flowR.success || (flowData && flowData.blocker)) {
+        const rb = await rollbackIfNamed(bridge, args, "replace_contact_block");
+        const rolledBack = ((rb.data as Record<string, unknown>) ?? {}).rolledBack === true;
+        if (data) data.rolledBack = rolledBack;
+        return {
+          success: false,
+          error: `replace_contact_block autoFlow: continue_story ${flowR.success ? "hit a blocker" : "failed"} — ${flowR.error || (flowData?.blocker as Record<string, unknown>)?.reasons || "unknown"}; the edit was ${rolledBack ? "rolled back" : "NOT rolled back — undo it"}`,
+          data: r.data,
+        };
+      }
+    }
     return r;
   });
 }
@@ -2054,6 +2098,10 @@ export async function continueStory(bridge: InDesignBridge, args: Record<string,
       while (story.overflows) {
         if (res.pagesAdded.length >= maxPages) { res.warnings.push('stopped after maxPages=' + maxPages + '; story still overset'); break; }
         if (__tp_now() - t0 > guardMs) { res.partial = true; res.warnings.push('stopped by the 90 s wall-clock guard; call again to continue'); break; }
+        // Track last composed character index to detect no-progress loops
+        // (e.g. table header rows repeat on new pages but no body rows flow).
+        var __lastComposedIdx = -1;
+        try { var __tcs = story.textContainers; for (var __ti = __tcs.length - 1; __ti >= 0; __ti--) { try { var __tcC = __tcs[__ti].characters; if (__tcC.length > 0) { __lastComposedIdx = __tcC[-1].index; break; } } catch (e) {} } } catch (e) {}
         var lp = last.parentPage;
         var nextIdx = lp.documentOffset + 1;
         if (nextIdx < doc.pages.length) {
@@ -2124,6 +2172,22 @@ export async function continueStory(bridge: InDesignBridge, args: Record<string,
             break;
           }
         }
+        // No-progress detection: if the story still overflows and the last
+        // composed character index did not advance, the new page only shows
+        // repeated table headers with no body rows. Remove it to prevent
+        // an infinite loop of empty-looking table pages.
+        if (nf.characters.length > 0 && story.overflows) {
+          var __newLastIdx = -1;
+          try { var __tcs2 = story.textContainers; for (var __ti2 = __tcs2.length - 1; __ti2 >= 0; __ti2--) { try { var __tc2 = __tcs2[__ti2].characters; if (__tc2.length > 0) { __newLastIdx = __tc2[-1].index; break; } } catch (e) {} } } catch (e) {}
+          if (__newLastIdx >= 0 && __lastComposedIdx >= 0 && __newLastIdx <= __lastComposedIdx) {
+            last.nextTextFrame = NothingEnum.NOTHING;
+            nf.remove(); np.remove();
+            res.blocker = { reasons: ['table header rows repeat on new pages but no body rows fit the frame height; adding more pages creates empty-looking pages (no new content composed)'] };
+            res.mismatch = { reason: 'no new content flowed into the added page; table headers repeat without body rows. Page removed to prevent empty table pages.', blocker: res.blocker };
+            res.error = 'no new content flowed: table header rows repeat but body rows are too tall for the frame; page removed. See data.blocker';
+            break;
+          }
+        }
         var info = __tp_pageInfo(np);
         info.frameId = nf.id;
         info.frameBounds = __tp_spreadToPage(np, nf.geometricBounds);
@@ -2139,7 +2203,8 @@ export async function continueStory(bridge: InDesignBridge, args: Record<string,
         res.parityFlipped = true;
       }
       return __ok(res);`;
-    const r = await runTp(bridge, args, body, { prelude: CONTINUE_JSX, undoName: "continue_story", mutating: true });
+    const skipUndo = (args as Record<string, unknown>)._noUndo === true;
+    const r = await runTp(bridge, args, body, { prelude: CONTINUE_JSX, undoName: skipUndo ? undefined : "continue_story", mutating: true });
     const d = r.data as Record<string, unknown> | undefined;
     if (r.success && d && d.error) return { success: false, error: String(d.error), data: d };
     return r;
@@ -2230,6 +2295,7 @@ export function registerSafeContentTools(bridge: InDesignBridge) {
           },
           acceptGrepEffects: { type: "boolean", description: "Same as the per-edit flag, for every edit of the call. Default false" },
           allowOverset: { type: "boolean", description: "Keep a write that pushes text into overset (warning). Default false: such a write is undone and reported as a mismatch. Pass true when the overflow is intended and you cascade it next with continue_story (story overflowing past its last threaded frame)" },
+          autoFlow: { type: "boolean", description: "Automatically calls continue_story after the write if the story overflows, adding pages as needed. If continue_story fails (e.g. a table blocks the flow), the entire write is rolled back. Default true — set false only when you handle overflow yourself" },
           keepLeadingAnchors: { type: "boolean", description: "Keep leading U+FFFC/tab prefix. Default true" },
           dryRun: { type: "boolean", description: "Validate and report without changing anything. Default false" },
           document_id: { type: "string", description: "Optional target document name" },
@@ -2292,6 +2358,7 @@ export function registerSafeContentTools(bridge: InDesignBridge) {
           wrapPolicy: { type: "string", enum: ["mismatch", "warn", "hangingIndent"], description: "What to do when a previously single-line line wraps. Default 'mismatch' (undo + mismatch)" },
           acceptGrepEffects: { type: "boolean", description: "Write lines containing ':' even though a ':'-keyed GREP/nested style will bold them (warning instead of mismatch)" },
           allowOverset: { type: "boolean", description: "Keep a write that pushes contact lines (or following text) into overset (warning). Default false: undo + 'pushed into overset' mismatch" },
+          autoFlow: { type: "boolean", description: "Automatically calls continue_story after the write if the story overflows, adding pages as needed. If continue_story fails (e.g. a table blocks the flow), the entire write is rolled back. Default true — set false only when you handle overflow yourself" },
           dryRun: { type: "boolean" },
           document_id: { type: "string", description: "Optional target document name" },
         },
