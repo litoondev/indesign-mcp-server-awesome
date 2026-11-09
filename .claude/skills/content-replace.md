@@ -26,6 +26,16 @@ Use this when the user wants the text of existing pages replaced, for example "r
 - Saving over the user's file, Save As outside the write roots, saving without a backup, and opening the test master or anything in Downloads.
 - Relinking or deleting the 3 missing links.
 
+## Service-by-service workflow (chapter with multiple providers)
+
+A chapter story often holds multiple services, each opening with a **Part Heading** paragraph. Work on them one at a time:
+
+1. `list_chapter_services {storyId}` — returns `[{serviceIndex, partHeadingText, providerName, startParagraphIndex, endParagraphIndex}, ...]`.
+2. For each service, pass `serviceIndex: N` to `replace_paragraphs` and `replace_contact_block`. The `paragraphIndex` in every edit is then **service-relative** (0 = first paragraph of that service). The tool resolves the absolute offset automatically via Part Heading boundaries.
+3. Process services in order (0, 1, 2, …) and verify each before moving to the next. Never mix absolute and relative indexes in the same call.
+
+If the story uses a non-standard style name, pass `partHeadingStyleId` or `partHeadingStyleName` to both `list_chapter_services` and `replace_paragraphs`.
+
 ## Steps
 1. **Check InDesign.** Call `probe_indesign`.
    - If any call returns `EXECUTION_TIMEOUT_STILL_RUNNING` or `INDESIGN_BUSY`, repeat `probe_indesign` until it answers.

@@ -473,6 +473,38 @@ async function snapshotDocument(bridge: InDesignBridge, args: Record<string, unk
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Chapter color registry (chapter_registry.json at project root)
+// Tracks which Pantone color is assigned to each chapter so every new chapter
+// gets its own unique color and the mapping is never lost between sessions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CHAPTER_REGISTRY_PATH = path.resolve("chapter_registry.json");
+
+interface ChapterEntry {
+  chapterNumber: number;
+  chapterName: string;
+  colorId?: number;
+  colorName?: string;
+  pantoneCode?: string;
+  masterId?: number;
+  masterName?: string;
+  registeredAt?: string;
+}
+
+function readRegistry(): ChapterEntry[] {
+  try {
+    if (!fs.existsSync(CHAPTER_REGISTRY_PATH)) return [];
+    return JSON.parse(fs.readFileSync(CHAPTER_REGISTRY_PATH, "utf-8")) as ChapterEntry[];
+  } catch {
+    return [];
+  }
+}
+
+function writeRegistry(entries: ChapterEntry[]): void {
+  fs.writeFileSync(CHAPTER_REGISTRY_PATH, JSON.stringify(entries, null, 2), "utf-8");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Registration
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -624,6 +656,56 @@ export function registerContentTools(bridge: InDesignBridge) {
         required: ["pageRange"],
       },
       handler: async (args: Record<string, unknown>) => snapshotDocument(bridge, args),
+    },
+
+    register_chapter_color: {
+      description:
+        "Record a chapter's unique Pantone color (and optional master info) in the project's chapter_registry.json. Every new chapter MUST " +
+        "get its own color — never reuse another chapter's color. Call this once you have confirmed the chapter's color with the user. " +
+        "Re-calling with the same chapterNumber updates the entry. Returns the full registry after the write.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          chapterNumber: { type: "number", description: "Chapter number (1-based)" },
+          chapterName: { type: "string", description: "Human-readable chapter title, e.g. 'Access to Finance'" },
+          colorId: { type: "number", description: "InDesign swatch id for the chapter colour" },
+          colorName: { type: "string", description: "Swatch name, e.g. 'Pantone 7498 C'" },
+          pantoneCode: { type: "string", description: "Pantone code, e.g. '7498 C'" },
+          masterId: { type: "number", description: "Master spread id used for this chapter" },
+          masterName: { type: "string", description: "Master spread name, e.g. '1-Access to Finance'" },
+        },
+        required: ["chapterNumber", "chapterName"],
+      },
+      handler: async (args: Record<string, unknown>) => {
+        const entries = readRegistry();
+        const idx = entries.findIndex((e) => e.chapterNumber === Number(args.chapterNumber));
+        const entry: ChapterEntry = {
+          chapterNumber: Number(args.chapterNumber),
+          chapterName: String(args.chapterName),
+          registeredAt: new Date().toISOString(),
+        };
+        if (args.colorId !== undefined) entry.colorId = Number(args.colorId);
+        if (args.colorName !== undefined) entry.colorName = String(args.colorName);
+        if (args.pantoneCode !== undefined) entry.pantoneCode = String(args.pantoneCode);
+        if (args.masterId !== undefined) entry.masterId = Number(args.masterId);
+        if (args.masterName !== undefined) entry.masterName = String(args.masterName);
+        if (idx >= 0) entries[idx] = entry; else entries.push(entry);
+        entries.sort((a, b) => a.chapterNumber - b.chapterNumber);
+        writeRegistry(entries);
+        return { success: true, data: { saved: entry, registry: entries, registryPath: CHAPTER_REGISTRY_PATH } };
+      },
+    },
+
+    list_chapter_colors: {
+      description:
+        "Read the project's chapter_registry.json and return all registered chapters with their colors. Use this at the start of any " +
+        "chapter job to check which colors are already assigned and which chapters still need a user-confirmed color. " +
+        "Returns an empty array when no chapters have been registered yet.",
+      inputSchema: { type: "object" as const, properties: {}, required: [] },
+      handler: async (_args: Record<string, unknown>) => {
+        const entries = readRegistry();
+        return { success: true, data: { chapterCount: entries.length, chapters: entries, registryPath: CHAPTER_REGISTRY_PATH } };
+      },
     },
 
     ...registerSafeContentTools(bridge),

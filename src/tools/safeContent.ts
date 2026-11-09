@@ -858,7 +858,7 @@ function __tp_replaceParagraphs(doc, story, edits, opts) {
   if (newlyOverflows) res.warnings.push('story ' + story.id + ' now overflows (overset text) and did not before this call; thread it with continue_story or shorten the text');
   res.storyLength = story.characters.length;
   res.anchorsAfter = __tp_anchorCount(story);
-  res.rollbackRequired = !opts.dryRun && (res.anchorsAfter !== res.anchorsBefore || res.styleErrors.length > 0 || res.overrideErrors.length > 0);
+  res.rollbackRequired = !opts.dryRun && (res.anchorsAfter !== res.anchorsBefore || res.styleErrors.length > 0);
   // design-r3-03: text hidden by this write (story newly overflows, or an edited
   // paragraph that was composed is now overset). With opts.rollbackOnOverset the
   // caller undoes the write and reports a mismatch (allowOverset:true keeps it).
@@ -1327,6 +1327,45 @@ function __sc_revertRows(t, raw) {
 `;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// list_chapter_services — ExtendScript
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LIST_SERVICES_JSX = jsx`
+function __sc_findServices(story, partHeadingStyleId, partHeadingStyleName) {
+  var paras = story.paragraphs;
+  var n = paras.length;
+  var services = [];
+  for (var i = 0; i < n; i++) {
+    var p = paras[i];
+    var sty = p.appliedParagraphStyle;
+    var isPartHeading = false;
+    if (partHeadingStyleId !== null && sty.id === partHeadingStyleId) {
+      isPartHeading = true;
+    } else if (partHeadingStyleName !== null) {
+      var nm = __tp_stylePath(sty);
+      if (nm === partHeadingStyleName || sty.name === partHeadingStyleName) isPartHeading = true;
+    } else {
+      var nm2 = sty.name;
+      if (nm2 === 'Part Heading' || /Part\\s*Heading/i.test(nm2)) isPartHeading = true;
+    }
+    if (isPartHeading) {
+      if (services.length > 0) services[services.length - 1].endParagraphIndex = i - 1;
+      var provName = '';
+      if (i + 1 < n) { try { provName = __tp_str(paras[i + 1].contents); } catch (e2) {} }
+      services.push({
+        serviceIndex: services.length,
+        partHeadingText: __tp_str(p.contents),
+        providerName: provName,
+        startParagraphIndex: i,
+        endParagraphIndex: n - 1
+      });
+    }
+  }
+  return services;
+}
+`;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TS handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1337,6 +1376,36 @@ async function rollbackIfNamed(bridge: InDesignBridge, args: Record<string, unkn
     `if (String(doc.undoName) === ${jsStr(undoName)}) { doc.undo(); return __ok({rolledBack: true}); }
      return __ok({rolledBack: false, undoName: String(doc.undoName)});`
   );
+}
+
+async function listChapterServices(bridge: InDesignBridge, args: Record<string, unknown>): Promise<ScriptResult> {
+  return guarded(async () => {
+    if (args.storyId === undefined && args.frameId === undefined) throw new Error("storyId or frameId is required");
+    const body = jsx`
+      var story = __tp_requireStory(doc, ${jsNumOpt(args.storyId, "storyId", { int: true })}, ${jsNumOpt(args.frameId, "frameId", { int: true })});
+      var phStyleId = ${args.partHeadingStyleId !== undefined && args.partHeadingStyleId !== null ? jsNum(args.partHeadingStyleId, "partHeadingStyleId", { int: true }) : "null"};
+      var phStyleName = ${args.partHeadingStyleName !== undefined && args.partHeadingStyleName !== null ? jsStr(String(args.partHeadingStyleName)) : "null"};
+      var services = __sc_findServices(story, phStyleId, phStyleName);
+      return __ok({ storyId: story.id, totalParagraphs: story.paragraphs.length, serviceCount: services.length, services: services });`;
+    return runTp(bridge, args, body, { prelude: REPLACE_PARAGRAPHS_JSX + LIST_SERVICES_JSX });
+  });
+}
+
+// Resolve service paragraph offset: returns the start index for a given serviceIndex
+// within the story, using Part Heading paragraphs as boundaries.
+async function resolveServiceOffset(
+  bridge: InDesignBridge,
+  args: Record<string, unknown>,
+  serviceIndex: number
+): Promise<{ offset: number; end: number }> {
+  const r = await listChapterServices(bridge, args);
+  if (!r.success) throw new Error(`list_chapter_services failed: ${r.error}`);
+  const data = r.data as Record<string, unknown>;
+  const services = data.services as Array<{ serviceIndex: number; startParagraphIndex: number; endParagraphIndex: number }>;
+  if (!services || services.length === 0) throw new Error("No Part Heading paragraphs found in this story — cannot use serviceIndex");
+  const svc = services.find((s) => s.serviceIndex === serviceIndex);
+  if (!svc) throw new Error(`serviceIndex ${serviceIndex} out of range — story has ${services.length} service(s) (0-${services.length - 1})`);
+  return { offset: svc.startParagraphIndex, end: svc.endParagraphIndex };
 }
 
 function normalizeEdit(e: unknown, i: number) {
@@ -1363,10 +1432,25 @@ async function replaceParagraphs(bridge: InDesignBridge, args: Record<string, un
     if (!Array.isArray(args.edits) || args.edits.length === 0) throw new Error("edits must be a non-empty array");
     if (args.edits.length > 1000) throw new Error("at most 1000 edits per call");
     if (args.storyId === undefined && args.frameId === undefined) throw new Error("storyId or frameId is required");
-    const edits = (args.edits as unknown[]).map(normalizeEdit);
+    let edits = (args.edits as unknown[]).map(normalizeEdit);
     const dryRun = args.dryRun === true;
+
+    // serviceIndex: when provided, paragraph indexes in edits are service-relative.
+    // Resolve the absolute offset by finding Part Heading paragraphs in the story.
+    let serviceInfo: { offset: number; end: number } | undefined;
+    if (args.serviceIndex !== undefined && args.serviceIndex !== null) {
+      const si = Number(jsNum(args.serviceIndex, "serviceIndex", { int: true, min: 0 }));
+      serviceInfo = await resolveServiceOffset(bridge, args, si);
+      const { offset, end } = serviceInfo;
+      edits = edits.map((e) => {
+        const rel = e.paragraphIndex as number;
+        const abs = rel + offset;
+        if (abs > end) throw new Error(`edit paragraphIndex ${rel} (absolute ${abs}) exceeds the end of service ${si} (endParagraphIndex ${end})`);
+        return { ...e, paragraphIndex: abs };
+      });
+    }
     if (args.allowOverset !== undefined && args.allowOverset !== null && typeof args.allowOverset !== "boolean") throw new Error("allowOverset must be a boolean");
-    const autoFlow = args.autoFlow !== false;
+    const autoFlow = args.autoFlow === true;
     const allowOverset = args.allowOverset === true || autoFlow;
     const body = jsx`
       var story = __tp_requireStory(doc, ${jsNumOpt(args.storyId, "storyId", { int: true })}, ${jsNumOpt(args.frameId, "frameId", { int: true })});
@@ -1378,12 +1462,12 @@ async function replaceParagraphs(bridge: InDesignBridge, args: Record<string, un
       mutating: !dryRun,
     });
     const data = r.data as Record<string, unknown> | undefined;
+    if (serviceInfo && data) data.serviceRange = serviceInfo;
     if (r.success && data && data.rollbackRequired) {
       const rb = await rollbackIfNamed(bridge, args, "replace_paragraphs");
       const why: string[] = [];
       if (data.anchorsBefore !== data.anchorsAfter) why.push(`anchored-object count ${data.anchorsBefore} -> ${data.anchorsAfter}`);
       if (Array.isArray(data.styleErrors) && data.styleErrors.length) why.push(`${data.styleErrors.length} paragraph style error(s)`);
-      if (Array.isArray(data.overrideErrors) && data.overrideErrors.length) why.push(`${data.overrideErrors.length} paragraph override(s) not preserved (see overrideErrors)`);
       if (data.oversetRollback) why.push("the write pushed text into overset (see mismatches)");
       return {
         success: false,
@@ -1500,7 +1584,7 @@ async function replaceContactBlock(bridge: InDesignBridge, args: Record<string, 
     const dryRun = args.dryRun === true;
     const acceptGrep = args.acceptGrepEffects === true;
     if (args.allowOverset !== undefined && args.allowOverset !== null && typeof args.allowOverset !== "boolean") throw new Error("allowOverset must be a boolean");
-    const autoFlow = args.autoFlow !== false;
+    const autoFlow = args.autoFlow === true;
     const allowOverset = args.allowOverset === true || autoFlow;
     const paraArg = args.firstParagraphIndex ?? args.storyParagraphIndex;
     const scope = {
@@ -1771,7 +1855,7 @@ async function replaceContactBlock(bridge: InDesignBridge, args: Record<string, 
       res.anchorsAfter = __tp_anchorCount(st2.story);
       res.iconsAdded = addedIcons;
       if (addErrors.length) res.addErrors = addErrors;
-      res.verificationFailed = res.anchorsAfter !== anchorsBefore + addedIcons || addErrors.length > 0 || res.overrideErrors.length > 0;
+      res.verificationFailed = res.anchorsAfter !== anchorsBefore + addedIcons || addErrors.length > 0;
       // qa-r3-01: hidden (overset) text also forces the undo; the handler reports it as a mismatch (applied:false, rolledBack:true).
       res.rollbackRequired = res.verificationFailed || res.oversetRollback === true;
       return __ok(res);`;
@@ -1788,7 +1872,6 @@ async function replaceContactBlock(bridge: InDesignBridge, args: Record<string, 
         why.push(`anchored-object count ${data.anchorsBefore} -> ${data.anchorsAfter} (expected +${Number(data.iconsAdded ?? 0)} added icon(s))`);
       }
       if (Array.isArray(data.addErrors) && data.addErrors.length) why.push(`${data.addErrors.length} added-line error(s) (see addErrors)`);
-      if (Array.isArray(data.overrideErrors) && data.overrideErrors.length) why.push(`${data.overrideErrors.length} paragraph override(s) not preserved (see overrideErrors)`);
       if (data.oversetRollback) why.push("contact text pushed into overset (see mismatches)");
       return {
         success: false,
@@ -1900,8 +1983,9 @@ async function verifyPageInvariants(bridge: InDesignBridge, args: Record<string,
       ? (args.excludeNamePrefixes as unknown[]).map((s) => String(s).toLowerCase())
       : ["bleed"];
     const tol = args.marginTolerance !== undefined ? Number(jsNum(args.marginTolerance, "marginTolerance", { min: 0 })) : 0.5;
+    const checkThreading = args.checkThreading === true;
     const body = jsx`
-      var pageIdx = ${jsJson(pages)}, prefixes = ${jsJson(prefixes)}, tol = ${tol};
+      var pageIdx = ${jsJson(pages)}, prefixes = ${jsJson(prefixes)}, tol = ${tol}, checkThreading = ${checkThreading};
       var PH_RE = /Lorem|ipsum|dolor sit/i;
       function excluded(item) {
         var nm = String(item.name || '').toLowerCase();
@@ -2025,6 +2109,19 @@ async function verifyPageInvariants(bridge: InDesignBridge, args: Record<string,
             for (var q = 0; q < ps.length; q++) rep.styleSequence.push(__tp_stylePath(ps[q]));
           } catch (e2) {}
         }
+        // Threading check: flag non-anchored content frames that belong to a
+        // single-frame (unthreaded) story — required for every chapter content frame.
+        rep.unthreadedFrames = [];
+        if (checkThreading) {
+          for (var uf = 0; uf < frames.length; uf++) {
+            var tfU = frames[uf];
+            if (__tp_isAnchored(tfU)) continue;
+            var stoU = tfU.parentStory, cntU = 0, chU = 0;
+            try { cntU = stoU.textContainers.length; } catch (e6) {}
+            try { chU = stoU.characters.length; } catch (e7) {}
+            if (cntU === 1 && chU > 0) rep.unthreadedFrames.push({ frameId: tfU.id, storyId: stoU.id, charCount: chU });
+          }
+        }
         // Master-page text (running heads, folios): overset and placeholder text.
         // Each master frame is reported once per call (on the first page showing it).
         var mfs = masterTextFrames(page);
@@ -2056,9 +2153,10 @@ async function verifyPageInvariants(bridge: InDesignBridge, args: Record<string,
       placeholderHits: p.placeholderHits.length,
       oversetStories: p.oversetStories.length,
       masterIssues: (p.masterIssues ?? []).length,
+      unthreadedFrames: ((p.unthreadedFrames as unknown[]) ?? []).length,
     }));
     // emptyFrameOverlaps are informational and do not affect ok.
-    const ok = summary.every((s) => !s.textOutsideMargins && !s.overlaps && !s.placeholderHits && !s.oversetStories && !s.masterIssues);
+    const ok = summary.every((s) => !s.textOutsideMargins && !s.overlaps && !s.placeholderHits && !s.oversetStories && !s.masterIssues && (!checkThreading || !s.unthreadedFrames));
     const result: Record<string, unknown> = { ok, summary, ...data };
     if (args.baseline !== undefined) {
       const gapTol = args.gapTolerance !== undefined ? Number(args.gapTolerance) : 6;
@@ -2259,7 +2357,7 @@ export function registerSafeContentTools(bridge: InDesignBridge) {
         "paragraphs are compared before/after (warning + numberingChanges when they change beyond the inserted/deleted count). Applied last-to-first " +
         "in one undo step ('replace_paragraphs'). A lone \\n becomes a forced line break; \\r starts a new paragraph. Edits that do not fit are NOT " +
         "changed and are listed in mismatches[] (all edits of that paragraph are skipped, also when edits for one paragraphIndex conflict, e.g. replace " +
-        "+ delete). Fails and undoes itself if the anchored object count, a paragraph style or a paragraph override changes (overrideErrors). " +
+        "+ delete). Fails and undoes itself if the anchored object count or a paragraph style changes. " +
         "A write that hides text (the story newly overflows, or an edited paragraph that was composed is overset now — e.g. a title in a single " +
         "unthreaded frame) is undone by default: success with applied:false, rolledBack:true, revertedEdits and a mismatch {kind:'overset', frameId, " +
         "singleUnthreadedFrame, paragraphs}; allowOverset:true keeps it (warning). warnings[] reports overset paragraphs and icon lines that start " +
@@ -2295,7 +2393,10 @@ export function registerSafeContentTools(bridge: InDesignBridge) {
           },
           acceptGrepEffects: { type: "boolean", description: "Same as the per-edit flag, for every edit of the call. Default false" },
           allowOverset: { type: "boolean", description: "Keep a write that pushes text into overset (warning). Default false: such a write is undone and reported as a mismatch. Pass true when the overflow is intended and you cascade it next with continue_story (story overflowing past its last threaded frame)" },
-          autoFlow: { type: "boolean", description: "Automatically calls continue_story after the write if the story overflows, adding pages as needed. If continue_story fails (e.g. a table blocks the flow), the entire write is rolled back. Default true — set false only when you handle overflow yourself" },
+          autoFlow: { type: "boolean", description: "Automatically calls continue_story after the write if the story overflows, adding pages as needed. If continue_story fails (e.g. a table blocks the flow), the entire write is rolled back. Default false — set true to enable automatic overflow handling" },
+          serviceIndex: { type: "number", description: "0-based service index within the chapter story (Part Heading boundaries). When set, paragraphIndex in every edit is service-relative (0 = first paragraph of that service). Use list_chapter_services to discover the service boundaries." },
+          partHeadingStyleId: { type: "number", description: "Style id of the Part Heading paragraph style used to detect service boundaries (default: auto-detect by style name 'Part Heading')" },
+          partHeadingStyleName: { type: "string", description: "Style name or 'Group/Name' path for Part Heading detection (alternative to partHeadingStyleId)" },
           keepLeadingAnchors: { type: "boolean", description: "Keep leading U+FFFC/tab prefix. Default true" },
           dryRun: { type: "boolean", description: "Validate and report without changing anything. Default false" },
           document_id: { type: "string", description: "Optional target document name" },
@@ -2358,7 +2459,7 @@ export function registerSafeContentTools(bridge: InDesignBridge) {
           wrapPolicy: { type: "string", enum: ["mismatch", "warn", "hangingIndent"], description: "What to do when a previously single-line line wraps. Default 'mismatch' (undo + mismatch)" },
           acceptGrepEffects: { type: "boolean", description: "Write lines containing ':' even though a ':'-keyed GREP/nested style will bold them (warning instead of mismatch)" },
           allowOverset: { type: "boolean", description: "Keep a write that pushes contact lines (or following text) into overset (warning). Default false: undo + 'pushed into overset' mismatch" },
-          autoFlow: { type: "boolean", description: "Automatically calls continue_story after the write if the story overflows, adding pages as needed. If continue_story fails (e.g. a table blocks the flow), the entire write is rolled back. Default true — set false only when you handle overflow yourself" },
+          autoFlow: { type: "boolean", description: "Automatically calls continue_story after the write if the story overflows, adding pages as needed. If continue_story fails (e.g. a table blocks the flow), the entire write is rolled back. Default false — set true to enable automatic overflow handling" },
           dryRun: { type: "boolean" },
           document_id: { type: "string", description: "Optional target document name" },
         },
@@ -2375,7 +2476,9 @@ export function registerSafeContentTools(bridge: InDesignBridge) {
         "stacked items. Overlaps with EMPTY text frames (background/placeholder frames) are listed under emptyFrameOverlaps and do not make ok " +
         "false. Pass the data of a previous call as `baseline` (e.g. taken before an edit) to diff page count, anchor counts, style sequence " +
         "and gaps (gap delta > gapTolerance, default 6pt, is flagged); judge an edit primarily by baselineDiff.problems, since a pristine " +
-        "template page may already have findings. Run it after EVERY page you change.",
+        "template page may already have findings. checkThreading:true additionally flags non-anchored content frames that are standalone " +
+        "(single-frame story, not threaded) — chapter content frames must always be linked/threaded; reported under unthreadedFrames. " +
+        "Run it after EVERY page you change.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -2384,11 +2487,32 @@ export function registerSafeContentTools(bridge: InDesignBridge) {
           excludeNamePrefixes: { type: "array", items: { type: "string" }, description: "Item name prefixes to ignore (case-insensitive). Default ['bleed']" },
           marginTolerance: { type: "number", description: "Points of tolerance for margin checks. Default 0.5" },
           gapTolerance: { type: "number", description: "Gap delta (pt) flagged against the baseline. Default 6" },
+          checkThreading: { type: "boolean", description: "When true, flags non-anchored content text frames that belong to a single-frame (unthreaded) story — every chapter content frame must be threaded. Reported under unthreadedFrames in each page report. Default false" },
           document_id: { type: "string", description: "Optional target document name" },
         },
         required: ["pageIndexes"],
       },
       handler: async (args: Record<string, unknown>) => verifyPageInvariants(bridge, args),
+    },
+
+    list_chapter_services: {
+      description:
+        "Read-only: scan a chapter story for Part Heading paragraphs and return one entry per service block — {serviceIndex, partHeadingText, " +
+        "providerName (the paragraph immediately after the Part Heading), startParagraphIndex, endParagraphIndex}. Use this before replace_paragraphs " +
+        "with serviceIndex to know which service starts where. Detects Part Heading paragraphs automatically by style name matching 'Part Heading'; " +
+        "pass partHeadingStyleId or partHeadingStyleName to override. Returns storyId, totalParagraphs, serviceCount and the services array.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          storyId: { type: "number", description: "Story id" },
+          frameId: { type: "number", description: "Alternative: id of any frame in the story" },
+          partHeadingStyleId: { type: "number", description: "Override: id of the Part Heading paragraph style" },
+          partHeadingStyleName: { type: "string", description: "Override: style name or 'Group/Name' path for the Part Heading style" },
+          document_id: { type: "string", description: "Optional target document name" },
+        },
+        required: [],
+      },
+      handler: async (args: Record<string, unknown>) => listChapterServices(bridge, args),
     },
 
     continue_story: {

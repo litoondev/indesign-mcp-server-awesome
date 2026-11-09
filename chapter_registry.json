@@ -1,0 +1,27 @@
+[
+  {
+    "chapterNumber": 1,
+    "chapterName": "Access to Women, Childcare, and Family Support Services",
+    "registeredAt": "2026-11-09T08:23:22.877Z",
+    "colorId": 302,
+    "colorName": "Pantone 7498 C",
+    "masterId": 258,
+    "masterName": "1-Access to Finance"
+  },
+  {
+    "chapterNumber": 2,
+    "chapterName": "Access to Social Welfare & Protection Services",
+    "registeredAt": "2026-11-09T08:23:34.497Z",
+    "colorId": 300,
+    "colorName": "Pantone 7621 C",
+    "masterId": 51234,
+    "masterName": "2-Access to Social Welfare"
+  },
+  {
+    "chapterNumber": 3,
+    "chapterName": "Access to Employment & Skill Development Services",
+    "registeredAt": "2026-11-09T08:26:23.340Z",
+    "colorId": 314,
+    "colorName": "Pantone 3298 C"
+  }
+]
