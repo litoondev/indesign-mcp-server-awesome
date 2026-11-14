@@ -29,7 +29,7 @@ MCP server for Adobe InDesign automation via COM (Windows) / AppleScript (Mac; u
 - Open source issue: `src/tools/page.ts` (add_page) has an unparenthesised chained ternary in ExtendScript (qa-r5-02); `tests/harness/lint_ternary.mjs` does not scan it.
 
 ## Safety (non-negotiable)
-- Never open, save or modify `.indd`/`.indt` files outside `test_fixtures\` and `test_output\`. **Never touch anything under `C:\Users\Litoondev\Downloads`.**
+- Never open, save or modify `.indd`/`.indt` files outside `test_fixtures\`, `test_output\`, and `I:\Brac\Design\`. **Never touch anything under `C:\Users\Litoondev\Downloads`.**
 - `test_fixtures\BRAC_TEST_MASTER.indd` (a copy of the user's v06 book) is pristine: never open or save it.
   - Copy it to `test_fixtures\runs\<label>.indd` and work on the copy. v05 (`BRAC_TEST_V05.indd`) must not be used.
 - Writes are limited to `INDESIGN_MCP_WRITE_ROOTS` (`;`-separated; default `test_fixtures\runs;test_output`). Only the user widens it.
@@ -48,6 +48,13 @@ node tests/harness/run.mjs <label> [--only=1,5,27] [--keep-open]   # live harnes
 - **After `npm run build`, start a new Claude session.** The MCP server loads `dist/` when the session starts, so running sessions keep the old tools.
 - The harness uses `dist/`, so build first. It copies `BRAC_TEST_MASTER.indd` to `test_fixtures\runs\<label>.indd`, opens only the copy, and runs the scenarios (`run.mjs`, `regress_r2.mjs`, `regress_r3.mjs`) through `invokeTool`. It writes `test_output\runs\<label>\results.json` plus JPEGs, then closes the copy without saving.
   - It refuses v05 and any master over 100 MB.
+
+## Roadmap, architecture, structure
+- `docs/ROADMAP.md`: north star, phases, open questions. **Start every new feature here.**
+- `docs/ARCHITECTURE.md`: layer diagram, data flow, review-workflow sequence, safety flow.
+- `docs/STRUCTURE.md`: the decision tree for where new code lands. Consult every time you add code.
+- `docs/decisions/`: ADRs. `0001-review-comments.md` covers the vision + UI-automation path for Share-for-Review comments.
+- `docs/README.md`: when to update which doc.
 
 ## Workflow skills (read before any document job)
 - `.claude/skills/brac-referral-template.md`: v06 book facts, ids, styles, colours, traps. **Read this first for BRAC.**

@@ -17,6 +17,9 @@ import { registerExportTools } from "./tools/export.js";
 import { registerTemplateTools } from "./tools/template.js";
 import { registerBatchTools } from "./tools/batch.js";
 import { registerContentTools } from "./tools/content.js";
+import { registerExtractTools } from "./tools/extract.js";
+import { registerMemoryTools } from "./tools/memory.js";
+import { registerReviewTools } from "./domains/review/index.js";
 
 const bridge = new InDesignBridge();
 
@@ -35,6 +38,9 @@ function loadAllTools() {
     registerTemplateTools(bridge),
     registerBatchTools(bridge),
     registerContentTools(bridge),
+    registerExtractTools(bridge),
+    registerMemoryTools(),
+    registerReviewTools(),
   ];
 
   for (const mod of modules) {
@@ -70,7 +76,7 @@ async function main() {
         isError: true,
       };
     }
-    return invokeTool(tool, (args ?? {}) as Record<string, unknown>);
+    return invokeTool(tool, (args ?? {}) as Record<string, unknown>, name);
   });
 
   const transport = new StdioServerTransport();

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brac-extract"
+version = "0.1.0"
+description = "Exact-character content extractor from .docx, .xlsx, .pdf for the InDesign MCP pipeline"
+requires-python = ">=3.10"
+dependencies = [
+  "python-docx>=1.1.2",
+  "openpyxl>=3.1.5",
+  "pdfplumber>=0.11.4",
+]
+
+[project.scripts]
+brac-extract = "brac_extract.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["brac_extract*"]

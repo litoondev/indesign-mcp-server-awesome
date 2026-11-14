@@ -1,4 +1,5 @@
 import { normalizeDocumentTarget, withDocumentTarget } from "./documentTarget.js";
+import { observe } from "../memory/observer.js";
 
 /**
  * Central tool plumbing shared by src/index.ts (MCP server) and test
@@ -25,7 +26,7 @@ export const DOCUMENT_ID_SCHEMA = {
 };
 
 /** Tools that act on the application or on files, not on an open document. */
-const NO_DOCUMENT_ID = new Set(["probe_indesign", "open_document", "create_document", "list_open_documents", "list_pdf_presets"]);
+const NO_DOCUMENT_ID = new Set(["probe_indesign", "open_document", "create_document", "list_open_documents", "list_pdf_presets", "extract_source", "read_extracted", "verify_extracted", "review_probe_cache", "review_capture_panel", "review_reply", "review_resolve", "review_action", "review_session_begin", "review_session_register_comments", "review_session_update", "review_session_get", "review_session_list", "review_session_end"]);
 
 /** Returns a copy of the schema with `document_id` present (string or integer). */
 export function withDocumentIdSchema(name: string, schema: ToolDef["inputSchema"]): ToolDef["inputSchema"] {
@@ -100,15 +101,17 @@ export function formatToolResult(result: unknown): McpToolResult {
 }
 
 /** Runs a tool with document_id bound for every script it executes. */
-export async function invokeTool(tool: ToolDef, args: Record<string, unknown>): Promise<McpToolResult> {
+export async function invokeTool(tool: ToolDef, args: Record<string, unknown>, toolName?: string): Promise<McpToolResult> {
+  const name = toolName ?? "";
   try {
     const target = normalizeDocumentTarget(args.document_id);
     const result = await withDocumentTarget(target, () => tool.handler(args));
+    if (name && !name.startsWith("memory_")) observe(name, result);
     return formatToolResult(result);
   } catch (error) {
-    return errorResult(
-      error instanceof Error ? error.message : String(error),
-      (error as { code?: string })?.code
-    );
+    const msg = error instanceof Error ? error.message : String(error);
+    const code = (error as { code?: string })?.code;
+    if (name && !name.startsWith("memory_")) observe(name, { ok: false, error: msg, code });
+    return errorResult(msg, code);
   }
 }
